@@ -182,10 +182,10 @@ app.post('/create_account', async (req, res) => {
 });
 
 // ==============================================================
-// 4️⃣ البروكسي الداخلي السحري للبث المباشر 🚀 (بدون CF Worker)
+// 4️⃣ البروكسي الداخلي السحري للبث المباشر 🚀 
 // ==============================================================
 app.get('/proxy_stream', async (req, res) => {
-    let { server, mac, stream_id, type } = req.query;
+    let { server, mac, stream_id, type, resolve_only } = req.query;
 
     if (server) {
         server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
@@ -193,13 +193,19 @@ app.get('/proxy_stream', async (req, res) => {
     }
     if (!server || !mac || !stream_id) return res.status(400).send("Missing params");
 
-    console.log(`[PROXY] server=${server} stream_id=${stream_id} type=${type}`);
+    console.log(`[PROXY] server=${server} stream_id=${stream_id} type=${type} resolve=${resolve_only}`);
 
     try {
+        // جلب التوكن
         const tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null);
         const tk = tkRes?.js?.token;
-        if (!tk) return res.status(403).send("MAC Blocked");
+        if (!tk) {
+            // تلبية طلب المتصفحات بفرض نوع البيانات الصحيح لمنع خطأ ORB
+            res.setHeader('Content-Type', 'video/mp2t');
+            return res.status(403).end();
+        }
 
+        // تجهيز رابط البث
         let streamUrl = "";
         if (type === 'vod' || type === 'movie') {
             streamUrl = `${server}/play/movie.php?mac=${mac}&stream=${stream_id}.mkv&type=movie`;
@@ -217,20 +223,20 @@ app.get('/proxy_stream', async (req, res) => {
             if (pt && !streamUrl.includes('play_token=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + `play_token=${pt}`;
         }
 
-        const spoofedIP = getSpoofedIP(mac);
-        // 🚀 تمرير جميع الهيدرز متطابقة مع التوكن + توكن 511 + منع حظر 403
+        // 🚀 السطر السحري المفقود: إرجاع الرابط المباشر للمنصة بدلاً من البث!
+        if (resolve_only === '1') {
+            return res.json({ success: true, stream_url: streamUrl, type });
+        }
+
+        // 🚀 هيدرز التخفي القصوى (تطابق VLC تماماً بدون فضح البروكسي عبر X-Forwarded-For)
         const reqHeaders = {
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Accept": "*/*",
             "Connection": "keep-alive",
             "Referer": `${server}/c/`,
             "Cookie": `mac=${mac}; stb_lang=en; timezone=Africa/Algiers;`,
-            "Authorization": `Bearer ${tk}`,
-            "X-Forwarded-For": spoofedIP,
-            "X-Real-IP": spoofedIP,
-            "Client-IP": spoofedIP
+            "Authorization": `Bearer ${tk}`
         };
-
         if (req.headers.range) reqHeaders["Range"] = req.headers.range;
 
         const controller = new AbortController();
@@ -243,24 +249,31 @@ app.get('/proxy_stream', async (req, res) => {
             signal: controller.signal 
         });
 
-        if (!fetchRes.ok && fetchRes.status !== 206) {
-            console.log(`[PROXY] Blocked by server: ${fetchRes.status}`);
-            return res.status(fetchRes.status).send(`Stream Error: ${fetchRes.status}`);
-        }
-
+        // إعداد استجابة آمنة للمتصفح لتخطي CORS 
         res.status(fetchRes.status);
-        setCorsHeaders(res);
-        ['content-type','content-length','content-range','accept-ranges'].forEach(h => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
+        
+        ['content-length','content-range','accept-ranges'].forEach(h => {
             if (fetchRes.headers.has(h)) res.setHeader(h, fetchRes.headers.get(h));
         });
-        if (!res.getHeader('Content-Type')) res.setHeader('Content-Type', (type==='vod'||type==='movie') ? 'video/mp4' : 'video/mp2t');
-        
-        // 🚀 تمرير الفيديو بكفاءة للمتصفح
+
+        // الفرض الإجباري لصيغة الفيديو 
+        res.setHeader('Content-Type', (type==='vod'||type==='movie') ? 'video/mp4' : 'video/mp2t');
+
+        // إذا استمر الحظر (مثل 403 أو 511)، ننهي الطلب بسلام دون إرسال صفحة HTML للمتصفح لمنع الانهيار
+        if (!fetchRes.ok && fetchRes.status !== 206) {
+            console.log(`[PROXY] Blocked by server: ${fetchRes.status}`);
+            return res.end(); 
+        }
+
+        // تمرير البث
         streamToResponse(fetchRes.body, res, req);
 
     } catch (e) {
-        console.log(`[PROXY] Exception: ${e.message}`);
-        res.status(500).send("Proxy Error");
+        res.setHeader('Content-Type', 'video/mp2t');
+        res.status(500).end();
     }
 });
 
