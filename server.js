@@ -4,9 +4,9 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 
 const app = express();
-const PORT = process.env.PORT || 8080; // Cloud Run يفضل بورت 8080
+const PORT = process.env.PORT || 8080;
 
-// ⚙️ الإعدادات الأساسية
+// ⚙️ الإعدادات
 const FIREBASE_URL = "https://gamerdz1517-db-default-rtdb.europe-west1.firebasedatabase.app";
 const CLOUDFLARE_WORKER_URL = "https://xt81.djamelchaouadi.workers.dev"; // الوركر الخاص بك
 
@@ -17,22 +17,11 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ limit: '2mb', extended: true }));
 
-const localCache = new Map();
-
-app.use((req, res, next) => {
-    if (req.path.includes('player_api') || req.path.includes('get_items') || req.path.includes('get.php'))
-        res.setHeader('Cache-Control', 'public, max-age=14400');
-    next();
-});
-
+// دوال مساعدة
 function getSpoofedIP(mac) {
     if (!mac) return '197.22.14.11';
-    let hash = 0;
-    const str = String(mac).toLowerCase();
-    for (let i = 0; i < str.length; i++) {
-        hash = ((hash << 5) - hash) + str.charCodeAt(i);
-        hash |= 0;
-    }
+    let hash = 0; const str = String(mac).toLowerCase();
+    for (let i = 0; i < str.length; i++) { hash = ((hash << 5) - hash) + str.charCodeAt(i); hash |= 0; }
     hash = Math.abs(hash);
     return `197.${(hash % 200) + 10}.${((hash >> 8) % 200) + 10}.${((hash >> 16) % 200) + 10}`;
 }
@@ -40,14 +29,12 @@ function getSpoofedIP(mac) {
 async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerAction, token = null) {
     const spoofedIP = getSpoofedIP(macAddress);
     const headers = {
-        "User-Agent":      "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-        "Referer":         `${serverUrl}/c/`,
-        "Cookie":          `mac=${macAddress}; stb_lang=en; timezone=Africa/Algiers;`,
-        "Accept":          "application/json, text/javascript, */*; q=0.01",
+        "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+        "Referer": `${serverUrl}/c/`,
+        "Cookie": `mac=${macAddress}; stb_lang=en; timezone=Africa/Algiers;`,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With":"XMLHttpRequest",
-        "X-Forwarded-For": spoofedIP,
-        "X-Real-IP":       spoofedIP,
-        "Client-IP":       spoofedIP
+        "X-Forwarded-For": spoofedIP, "X-Real-IP": spoofedIP, "Client-IP": spoofedIP
     };
 
     let targetUrl;
@@ -61,9 +48,8 @@ async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerActi
             headers["Authorization"] = `Bearer ${token}`;
         }
     }
-
     try {
-        const res = await fetch(targetUrl, { headers, timeout: 35000 });
+        const res = await fetch(targetUrl, { headers, timeout: 20000 });
         if (!res.ok) return null;
         return await res.json();
     } catch { return null; }
@@ -87,13 +73,11 @@ async function fetchContentStrict(server, mac, type, allowedIds, categoryId, tok
     }
 
     const uniqueMap = new Map();
-    const batchSize = 3;
-
     for (const catId of catsToFetch) {
         const catQuery = catId ? `&${genreParam}=${catId}` : "";
         let page = 1, keepGoing = true;
         while (keepGoing && page <= 60) {
-            const promises = Array.from({length: batchSize}, (_, i) =>
+            const promises = Array.from({length: 3}, (_, i) =>
                 callStalkerDirect(server, mac, type, `get_ordered_list${catQuery}${extraQuery}&limit=1500&p=${page+i}`, token)
             );
             const results = await Promise.all(promises);
@@ -112,41 +96,17 @@ async function fetchContentStrict(server, mac, type, allowedIds, categoryId, tok
                 }
             }
             if (!found) { keepGoing = false; break; }
-            page += batchSize;
+            page += 3;
         }
     }
     return Array.from(uniqueMap.values());
 }
 
-app.post('/create_account', async (req, res) => {
-    try {
-        const { mac, server, selections } = req.body;
-        if (!mac || !server) return res.json({success: false, error: "Missing Data"});
-
-        const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-        let shortPass = '';
-        for (let i = 0; i < 8; i++) shortPass += chars.charAt(Math.floor(Math.random() * chars.length));
-
-        const dbData = { mac: mac.trim(), server: server.trim(), selections };
-        
-        let fbRes = await fetch(`${FIREBASE_URL}/accounts/${shortPass}.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(dbData)
-        });
-
-        if(fbRes.ok) {
-            localCache.set(shortPass, { srv: dbData.server, mac: dbData.mac, selections: dbData.selections });
-            return res.json({success: true, password: shortPass});
-        }
-        else return res.json({success: false, error: "Database Error"});
-    } catch(e) { res.json({success: false, error: e.message}); }
-});
-
+// 1. الفحص
 app.get('/api/scan', async (req, res) => {
-    let server = req.query.server;
-    let mac = req.query.mac;
+    let { server, mac } = req.query;
     try {
+        server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
         let hsRaw = await callStalkerDirect(server, mac, "stb", "handshake", null);
         let tk = hsRaw?.js?.token;
         if(!tk) return res.json({success: false, error: "الماك محظور أو السيرفر لا يستجيب"});
@@ -164,6 +124,7 @@ app.get('/api/scan', async (req, res) => {
     } catch(e) { res.json({success: false, error: e.message}); }
 });
 
+// 2. جلب العناصر
 app.post('/api/get_items', async (req, res) => {
     const { server, mac, type, selectedCats } = req.body;
     try {
@@ -172,18 +133,29 @@ app.post('/api/get_items', async (req, res) => {
         if (!tk) return res.json({ success:false, error:"MAC Blocked" });
 
         const items = await fetchContentStrict(server, mac, type, selectedCats, null, tk);
-        const formatted = items.map(item => ({
-            id:   item.id || item.cmd,
-            name: item.name || item.cmd,
-            logo: item.logo || item.screenshot_uri || ""
-        }));
+        const formatted = items.map(item => ({ id: item.id || item.cmd, name: item.name || item.cmd, logo: item.logo || item.screenshot_uri || "" }));
         res.json({ success:true, data:formatted });
     } catch(e) { res.json({ success:false, error:e.message }); }
 });
 
-// ================================================================
-// 🚀 Proxy Stream - التوجيه السريع والصاروخي بدون تحميل الفيديو
-// ================================================================
+// 3. التسجيل
+app.post('/create_account', async (req, res) => {
+    try {
+        const { mac, server, selections } = req.body;
+        if (!mac || !server) return res.json({success: false, error: "Missing Data"});
+        const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'; let shortPass = '';
+        for (let i = 0; i < 8; i++) shortPass += chars.charAt(Math.floor(Math.random() * chars.length));
+        
+        let fbRes = await fetch(`${FIREBASE_URL}/accounts/${shortPass}.json`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac: mac.trim(), server: server.trim(), selections })
+        });
+
+        if(fbRes.ok) return res.json({success: true, password: shortPass});
+        else return res.json({success: false, error: "Database Error"});
+    } catch(e) { res.json({success: false, error: e.message}); }
+});
+
+// 4. استخراج الرابط (الآن لا يبث، فقط يعيد الرابط الأصلي أو يوجه لتطبيق الهاتف)
 app.get('/proxy_stream', async (req, res) => {
     let { server, mac, stream_id, type, resolve_only } = req.query;
     if (server) { server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, ''); if (!server.startsWith('http')) server = 'http://' + server; }
@@ -191,8 +163,8 @@ app.get('/proxy_stream', async (req, res) => {
     
     try {
         const tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null);
-        const tk    = tkRes?.js?.token;
-        if (!tk) return res.status(403).send("MAC Blocked");
+        const tk = tkRes?.js?.token;
+        if (!tk) return res.status(403).json({success: false, error: "MAC Blocked"});
         
         let streamUrl = "";
         if (type === 'vod' || type === 'movie') {
@@ -208,28 +180,20 @@ app.get('/proxy_stream', async (req, res) => {
             }
             if (!streamUrl) { streamUrl = `${server}/play/live.php?mac=${mac}&stream=${stream_id}&extension=ts`; if (pt) streamUrl += `&play_token=${pt}`; }
         }
+        if (!streamUrl) return res.status(404).json({success: false, error: "Stream not found"});
         
-        if (!streamUrl) return res.status(404).send("Stream not found");
+        // 🚀 للمنصة (Blogger): نرجع الرابط والتوكن
+        if (resolve_only === '1') return res.json({ success: true, stream_url: streamUrl, token: tk });
         
-        // 🚀 إذا طلب المشغل الرابط المباشر (للمنصة)
-        if (resolve_only === '1') return res.json({ success:true, stream_url:streamUrl, type });
-
-        // 🚀 لتطبيقات XTREAM (الهاتف): توجيه مباشر نحو Cloudflare Worker ليتكفل بالبث
-        const workerUrl = `${CLOUDFLARE_WORKER_URL}/stream?url=${encodeURIComponent(streamUrl)}`;
+        // 🚀 لتطبيقات XTREAM (تطبيق الاندرويد): نحولهم تلقائياً لـ Cloudflare Worker للبث
+        let workerUrl = `${CLOUDFLARE_WORKER_URL}/stream?url=${encodeURIComponent(streamUrl)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(tk)}`;
         return res.redirect(302, workerUrl);
 
-    } catch(e) {
-        res.status(500).send("Proxy Error: " + e.message); 
-    }
+    } catch(e) { res.status(500).send("Resolve Error: " + e.message); }
 });
 
-// ================================================================
-// محاكاة واجهات Xtream
-// ================================================================
-app.get('/player_api.php', async (req, res) => {
-    res.json({ user_info: { auth: 1, status: "Active" } });
-});
-
+// 5. محاكاة Xtream Codes
+app.get('/player_api.php', async (req, res) => { res.json({ user_info: { auth: 1, status: "Active" } }); });
 app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:user/:pass/:stream'], async (req, res) => {
     const reqPass = req.params.pass;
     const streamId = req.params.stream.split('.')[0];
@@ -238,9 +202,8 @@ app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:us
     try {
         const fbRes = await fetch(`${FIREBASE_URL}/accounts/${reqPass}.json`);
         const account = await fbRes.json();
-        
         if (account && account.server && account.mac) {
-            // توجيه ذكي نحو مسار البروكسي الخاص بنا
+            // توجيه التطبيق لمسارنا ليتم استخراج الرابط ثم توجيهه للـ Worker
             res.redirect(302, `/proxy_stream?server=${encodeURIComponent(account.server)}&mac=${encodeURIComponent(account.mac)}&stream_id=${streamId}&type=${typeStr}`);
         } else {
             res.status(401).send("Unauthorized");
@@ -248,5 +211,5 @@ app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:us
     } catch(e) { res.status(500).send("Error"); }
 });
 
-app.get('/', (req, res) => res.status(200).send('✅ GAMERDZ1517 SERVER IS RUNNING PERFECTLY ON CLOUD RUN!'));
+app.get('/', (req, res) => res.status(200).send('✅ GAMERDZ1517 API IS RUNNING (No Streaming)!'));
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
