@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 8080;
 
 // ⚙️ الإعدادات
 const FIREBASE_URL = "https://gamerdz1517-db-default-rtdb.europe-west1.firebasedatabase.app";
-const CLOUDFLARE_WORKER_URL = "https://xt81.djamelchaouadi.workers.dev"; // الوركر الخاص بك
+const CLOUDFLARE_WORKER_URL = "https://run.djamelchaouadi.workers.dev"; // الوركر الخاص بك
 
 process.on('uncaughtException', (err) => console.error('Caught exception:', err));
 process.on('unhandledRejection', (reason) => console.error('Unhandled Rejection:', reason));
