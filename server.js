@@ -165,15 +165,26 @@ app.post('/create_account', async (req, res) => {
 // ==============================================================
 app.get('/proxy_stream', async (req, res) => {
     let { server, mac, stream_id, type } = req.query;
+
+    if (server) {
+        server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
+        if (!server.startsWith('http')) server = 'http://' + server;
+    }
     if (!server || !mac || !stream_id) return res.status(400).send("Missing params");
 
-    server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
+    console.log(`[PROXY] server=${server} stream_id=${stream_id} type=${type}`);
 
     try {
+        // جلب التوكن
         const tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null);
         const tk = tkRes?.js?.token;
-        if (!tk) return res.status(403).send("MAC Blocked");
+        if (!tk) {
+            // تلبية طلب المساعد الذكي: فرض Content-Type لمنع ORB Error
+            res.setHeader('Content-Type', 'video/mp2t');
+            return res.status(403).end();
+        }
 
+        // تجهيز رابط البث
         let streamUrl = "";
         if (type === 'vod' || type === 'movie') {
             streamUrl = `${server}/play/movie.php?mac=${mac}&stream=${stream_id}.mkv&type=movie`;
@@ -191,15 +202,54 @@ app.get('/proxy_stream', async (req, res) => {
             if (pt && !streamUrl.includes('play_token=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + `play_token=${pt}`;
         }
 
-        // تحويل المتصفح فوراً إلى الوركر ليتكفل بالبث بدون ضغط على السيرفر
-        const workerUrl = `${CLOUDFLARE_WORKER_URL}/stream?url=${encodeURIComponent(streamUrl)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(tk)}`;
-        return res.redirect(302, workerUrl);
+        // 🚀 هيدرز التخفي القصوى (تطابق VLC تماماً بدون X-Forwarded-For)
+        const reqHeaders = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+            "Accept": "*/*",
+            "Connection": "keep-alive",
+            "Referer": `${server}/c/`,
+            "Cookie": `mac=${mac}; stb_lang=en; timezone=Africa/Algiers;`,
+            "Authorization": `Bearer ${tk}`
+        };
+        if (req.headers.range) reqHeaders["Range"] = req.headers.range;
+
+        const controller = new AbortController();
+        req.on('close', () => controller.abort());
+
+        const fetchRes = await fetch(streamUrl, { 
+            headers: reqHeaders, 
+            redirect: 'follow', 
+            timeout: 15000, 
+            signal: controller.signal 
+        });
+
+        // إعداد استجابة آمنة للمتصفح لتخطي CORS و ORB
+        res.status(fetchRes.status);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
+        
+        ['content-length','content-range','accept-ranges'].forEach(h => {
+            if (fetchRes.headers.has(h)) res.setHeader(h, fetchRes.headers.get(h));
+        });
+
+        // 🚀 الفرض الإجباري لصيغة الفيديو (حل تحذير المساعد الذكي)
+        res.setHeader('Content-Type', (type==='vod'||type==='movie') ? 'video/mp4' : 'video/mp2t');
+
+        // إذا استمر الحظر، ننهي الطلب بسلام دون إرسال صفحة HTML مفخخة للمتصفح
+        if (!fetchRes.ok && fetchRes.status !== 206) {
+            console.log(`[PROXY] Blocked by server: ${fetchRes.status}`);
+            return res.end(); 
+        }
+
+        // تمرير البث
+        streamToResponse(fetchRes.body, res, req);
 
     } catch (e) {
-        res.status(500).send("Proxy Error");
+        res.setHeader('Content-Type', 'video/mp2t');
+        res.status(500).end();
     }
 });
-
 // ==============================================================
 // 4️⃣ محاكاة واجهة Xtream Codes API (لتعمل على التطبيقات)
 // ==============================================================
