@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 const FIREBASE_URL = "https://gamerdz1517-db-default-rtdb.europe-west1.firebasedatabase.app"; 
 
 // ⚠️ رابط Cloudflare Worker الخاص بك (احتياطي فقط)
-const CLOUDFLARE_WORKER_URL = "https://xt81.djamelchaouadi.workers.dev";
+const CLOUDFLARE_WORKER_URL = "https://run.djamelchaouadi.workers.dev";
 
 // 🛡️ حماية السيرفر من الانهيار
 process.on('uncaughtException', function (err) { console.error('Caught exception: ', err); });
