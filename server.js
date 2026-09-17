@@ -1,74 +1,104 @@
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
-const FIREBASE_URL = "https://gamerdz1517-db-default-rtdb.europe-west1.firebasedatabase.app";
+// ⚠️ رابط قاعدة بيانات Firebase الخاص بك
+const FIREBASE_URL = "https://gamerdz1517-db-default-rtdb.europe-west1.firebasedatabase.app"; 
 
-process.on('uncaughtException', (err) => console.error('Caught exception:', err));
-process.on('unhandledRejection', (reason) => console.error('Unhandled Rejection:', reason));
+// ⚠️ رابط Cloudflare Worker الخاص بك (احتياطي فقط)
+const CLOUDFLARE_WORKER_URL = "https://xt.gamerdz1517.com";
+
+// 🛡️ حماية السيرفر من الانهيار
+process.on('uncaughtException', function (err) { console.error('Caught exception: ', err); });
+process.on('unhandledRejection', (reason, p) => { console.error('Unhandled Rejection: ', reason); });
 
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ limit: '2mb', extended: true }));
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
-function getSpoofedIP(mac) {
-    if (!mac) return '197.22.14.11';
-    let hash = 0;
-    const str = String(mac).toLowerCase();
-    for (let i = 0; i < str.length; i++) {
-        hash = ((hash << 5) - hash) + str.charCodeAt(i);
-        hash |= 0;
+// 🛡️ نظام الكاش الذكي لتقليل الطلبات وحماية السيرفر (تمت إضافته لكودك الأصلي)
+const listsCache = new Map();
+app.use((req, res, next) => {
+    if (req.path.includes('player_api') || req.path.includes('get_items') || req.path.includes('scan') || req.path.includes('get.php')) {
+        res.setHeader('Cache-Control', 'public, max-age=14400');
     }
-    hash = Math.abs(hash);
-    return `197.${(hash % 200) + 10}.${((hash >> 8) % 200) + 10}.${((hash >> 16) % 200) + 10}`;
+    next();
+});
+
+const localCache = new Map();
+
+async function getAuthDataFromFirebase(password) {
+    if (!password) return null;
+    if (localCache.has(password)) return localCache.get(password);
+    try {
+        let res = await fetch(`${FIREBASE_URL}/accounts/${password}.json`);
+        if (!res.ok) return null;
+        let data = await res.json();
+        if (data && data.server && data.mac) {
+            let authResult = { srv: data.server, mac: data.mac, selections: data.selections };
+            localCache.set(password, authResult); 
+            return authResult;
+        }
+        return null;
+    } catch(e) { return null; }
 }
 
-// دالة تمرير الفيديو الآمنة بنظام Pipe
-function streamToResponse(fetchBody, res, req) {
-    if (fetchBody.pipe && typeof fetchBody.pipe === 'function') {
-        fetchBody.pipe(res);
-        req.on('close', () => {
-            if (fetchBody.destroy) fetchBody.destroy();
-            if (!res.writableEnded) res.end();
-        });
-    } else if (fetchBody.on && typeof fetchBody.on === 'function') {
-        fetchBody.on('data', (chunk) => { if (!res.writableEnded) res.write(chunk); });
-        fetchBody.on('end',   ()      => { if (!res.writableEnded) res.end(); });
-        fetchBody.on('error', ()      => { if (!res.writableEnded) res.end(); });
-        req.on('close', () => {
-            if (!res.writableEnded) res.end();
-            if (typeof fetchBody.destroy === 'function') fetchBody.destroy();
-        });
-    } else {
-        if (!res.writableEnded) res.end();
-    }
+function encodeSafeBase64(str) {
+    try { return Buffer.from(unescape(encodeURIComponent(str))).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); } 
+    catch(e) { return Buffer.from(str).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 }
 
-function setCorsHeaders(res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Accept-Ranges');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
+function decodeSafeBase64(str) {
+    try {
+        let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) { b64 += '='; }
+        return decodeURIComponent(escape(Buffer.from(b64, 'base64').toString('utf-8')));
+    } catch(e) { return str; }
+}
+
+function isAdultContent(name) {
+    if (!name) return false;
+    return /porn|xxx|adult|18\+|erotic|sex|adults/i.test(name.toLowerCase());
+}
+
+function getRealLogo(serverUrl, logoPath, type) {
+    if (!logoPath) return "";
+    let url = String(logoPath).trim();
+    if (url.startsWith('http')) return url;
+    let srv = serverUrl.replace(/\/+$/, '');
+    if (url.startsWith('/')) return srv + url;
+    if (url.includes('/')) return srv + '/' + url;
+    if (type === 'vod' || type === 'series') return srv + '/stalker_portal/misc/video_cover/' + url;
+    return srv + '/stalker_portal/misc/logos/320/' + url;
+}
+
+function safeFallback(action) {
+    let timeNow = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    if (action === "") {
+        return {
+            user_info: { username: "GAMERDZ", password: "", message: "Unauthorized", auth: 0, status: "Inactive", exp_date: "0", is_trial: "0", active_cons: "0", max_connections: "1000", created_at: "0", allowed_output_formats: ["m3u8", "ts", "rtmp", "mkv", "mp4"] },
+            server_info: { url: "", port: "80", https_port: "443", server_protocol: "http", timezone: "Africa/Algiers", version: "2.9.0" }
+        };
+    } else if (action === "get_series_info") {
+        return { seasons: [], episodes: {}, info: { name: "Not Found", cover: "", plot: "", cast: "", director: "", genre: "", releaseDate: "", rating: "5", rating_5based: 5.0, backdrop_path: [] } };
+    } else if (action === "get_short_epg" || action === "get_simple_data_table") {
+        return { epg_listings: [] };
+    } else return [];
 }
 
 async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerAction, token = null) {
-    const spoofedIP = getSpoofedIP(macAddress);
-    const headers = {
+    let targetUrl = "";
+    let headers = {
         "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
         "Referer": `${serverUrl}/c/`,
         "Cookie": `mac=${macAddress}; stb_lang=en; timezone=Africa/Algiers;`,
         "Accept": "application/json, text/javascript, */*; q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "X-Forwarded-For": spoofedIP,
-        "X-Real-IP": spoofedIP,
-        "Client-IP": spoofedIP
+        "X-Requested-With": "XMLHttpRequest"
     };
 
-    let targetUrl;
     if (stalkerAction === "handshake") {
         targetUrl = `${serverUrl}/portal.php?action=handshake&type=stb&token=&JsHttpRequest=1-xml`;
         headers["Authorization"] = `MAC ${macAddress}`;
@@ -81,191 +111,520 @@ async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerActi
     }
 
     try {
-        const res = await fetch(targetUrl, { headers, timeout: 20000 });
+        const res = await fetch(targetUrl, { headers: headers, timeout: 35000 });
         if (!res.ok) return null;
         return await res.json();
-    } catch { return null; }
+    } catch(e) { return null; }
 }
 
-async function fetchContentStrict(server, mac, type, allowedIds, categoryId, token) {
-    const genreParam = type === "itv" ? "genre" : "category";
-    let catsToFetch = allowedIds.includes('ALL') ? [""] : allowedIds;
-    const uniqueMap = new Map();
+async function fetchContentStrict(server, mac, type, allowedIds, categoryId, token, extraParam = "") {
+    let genreParam = type === "itv" ? "genre" : "category";
+    let targetCat = (categoryId && categoryId !== "0" && categoryId !== "*" && categoryId !== "null" && categoryId !== "undefined") ? categoryId : "";
+    let extraQuery = extraParam ? `&${extraParam}` : "";
 
-    for (const catId of catsToFetch) {
-        const catQuery = catId ? `&${genreParam}=${catId}` : "";
-        let page = 1, keepGoing = true;
-        while (keepGoing && page <= 30) {
-            const promises = Array.from({ length: 3 }, (_, i) =>
-                callStalkerDirect(server, mac, type, `get_ordered_list${catQuery}&limit=1500&p=${page + i}`, token)
-            );
-            const results = await Promise.all(promises);
-            let found = false;
-            for (const res of results) {
+    let catsToFetch = [];
+    if (targetCat !== "") {
+        catsToFetch = [targetCat];
+    } else {
+        if (allowedIds.includes('ALL')) {
+            let catRes = await callStalkerDirect(server, mac, type, type === "itv" ? "get_genres" : "get_categories", token);
+            let list = catRes?.js ? (Array.isArray(catRes.js) ? catRes.js : Object.values(catRes.js)) : [];
+            catsToFetch = list.map(c => String(c.id));
+            if (catsToFetch.length === 0) catsToFetch = [""]; 
+        } else {
+            catsToFetch = allowedIds; 
+        }
+    }
+
+    let uniqueMap = new Map();
+    let batchSize = 3; 
+
+    for (let catId of catsToFetch) {
+        let catQuery = catId !== "" ? `&${genreParam}=${catId}` : "";
+        let currentPage = 1;
+        let keepGoing = true;
+
+        while (keepGoing && currentPage <= 60) { 
+            let promises = [];
+            for (let i = 0; i < batchSize; i++) {
+                let page = currentPage + i;
+                promises.push(callStalkerDirect(server, mac, type, `get_ordered_list${catQuery}${extraQuery}&limit=1500&p=${page}`, token));
+            }
+            
+            let chunkResults = await Promise.all(promises);
+            let foundDataInChunk = false;
+
+            for (let res of chunkResults) {
                 let pageData = res?.js?.data || res?.js;
                 if (!pageData) continue;
-                if (!Array.isArray(pageData)) pageData = Object.values(pageData);
-                for (const item of pageData) {
-                    const id = item.id || item.cmd || Math.random();
-                    if (!uniqueMap.has(id)) uniqueMap.set(id, item);
-                    found = true;
+                if (!Array.isArray(pageData)) {
+                    if (typeof pageData === 'object' && Object.keys(pageData).length > 0) pageData = Object.values(pageData);
+                    else pageData = [];
+                }
+                
+                if (pageData.length > 0) {
+                    for (let x = 0; x < pageData.length; x++) {
+                        let item = pageData[x];
+                        let itemCatId = String(item.tv_genre_id || item.category_id || catId || targetCat || "0");
+
+                        if (allowedIds.includes('ALL') || allowedIds.includes(itemCatId) || extraParam !== "") {
+                            let id = item.id || item.cmd;
+                            if (!id) id = Math.random();
+                            if (!uniqueMap.has(id)) {
+                                item.injected_cat_id = itemCatId; 
+                                uniqueMap.set(id, item);
+                            }
+                        }
+                    }
+                    foundDataInChunk = true;
                 }
             }
-            if (!found) { keepGoing = false; break; }
-            page += 3;
+            chunkResults = null; 
+            if (!foundDataInChunk) { keepGoing = false; break; }
+            currentPage += batchSize;
         }
     }
     return Array.from(uniqueMap.values());
 }
 
-// 1. فحص السيرفر
-app.get('/api/scan', async (req, res) => {
-    let { server, mac } = req.query;
-    try {
-        server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
-        let hsRaw = await callStalkerDirect(server, mac, "stb", "handshake", null);
-        let tk = hsRaw?.js?.token;
-        if (!tk) return res.json({ success: false, error: "الماك محظور أو السيرفر لا يستجيب" });
-
-        let liveRes = await callStalkerDirect(server, mac, "itv", "get_genres", tk);
-        let vodRes = await callStalkerDirect(server, mac, "vod", "get_categories", tk);
-        let seriesRes = await callStalkerDirect(server, mac, "series", "get_categories", tk).catch(() => ({ js: [] }));
-
-        let formatCats = (arr) => {
-            let list = Array.isArray(arr) ? arr : Object.values(arr || {});
-            return list.map(c => ({ id: String(c.id), title: String(c.title || c.name) }));
-        };
-        res.json({ success: true, categories: { live: formatCats(liveRes?.js), vod: formatCats(vodRes?.js), series: formatCats(seriesRes?.js) } });
-    } catch (e) { res.json({ success: false, error: e.message }); }
-});
-
-// 2. جلب القنوات
-app.post('/api/get_items', async (req, res) => {
-    const { server, mac, type, selectedCats } = req.body;
-    try {
-        const hs = await callStalkerDirect(server, mac, "stb", "handshake", null);
-        const tk = hs?.js?.token;
-        if (!tk) return res.json({ success: false, error: "MAC Blocked" });
-
-        const items = await fetchContentStrict(server, mac, type, selectedCats, null, tk);
-        const formatted = items.map(item => ({ id: item.id || item.cmd, name: item.name || item.cmd, logo: item.logo || item.screenshot_uri || "" }));
-        res.json({ success: true, data: formatted });
-    } catch (e) { res.json({ success: false, error: e.message }); }
-});
-
-// 3. إنشاء الحساب
 app.post('/create_account', async (req, res) => {
     try {
         const { mac, server, selections } = req.body;
-        if (!mac || !server) return res.json({ success: false, error: "Missing Data" });
+        if (!mac || !server) return res.json({success: false, error: "Missing Data"});
 
         const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
         let shortPass = '';
         for (let i = 0; i < 8; i++) shortPass += chars.charAt(Math.floor(Math.random() * chars.length));
 
-        await fetch(`${FIREBASE_URL}/accounts/${shortPass}.json`, {
+        const dbData = { mac: mac.trim(), server: server.trim(), selections };
+        
+        let fbRes = await fetch(`${FIREBASE_URL}/accounts/${shortPass}.json`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mac: mac.trim(), server: server.trim(), selections })
+            body: JSON.stringify(dbData)
         });
-        res.json({ success: true, password: shortPass });
-    } catch (e) { res.json({ success: false, error: e.message }); }
+
+        if(fbRes.ok) {
+            localCache.set(shortPass, { srv: dbData.server, mac: dbData.mac, selections: dbData.selections });
+            return res.json({success: true, password: shortPass});
+        }
+        else return res.json({success: false, error: "Database Error"});
+    } catch(e) { res.json({success: false, error: e.message}); }
 });
 
-// 4. البث المباشر (مثل Render تماماً دون ووركر)
-app.get('/proxy_stream', async (req, res) => {
-    let { server, mac, stream_id, type } = req.query;
-    if (server) {
-        server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
-        if (!server.startsWith('http')) server = 'http://' + server;
-    }
-    if (!server || !mac || !stream_id) return res.status(400).send("Missing params");
-
+app.get('/api/scan', async (req, res) => {
+    let server = req.query.server;
+    let mac = req.query.mac;
     try {
-        const tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null);
-        const tk = tkRes?.js?.token;
-        if (!tk) return res.status(403).send("MAC Blocked");
+        let hsRaw = await callStalkerDirect(server, mac, "stb", "handshake", null);
+        let tk = hsRaw?.js?.token;
+        if(!tk) return res.json({success: false, error: "الماك محظور أو السيرفر لا يستجيب"});
+
+        let liveRes = await callStalkerDirect(server, mac, "itv", "get_genres", tk);
+        let vodRes = await callStalkerDirect(server, mac, "vod", "get_categories", tk);
+        let seriesRes = await callStalkerDirect(server, mac, "series", "get_categories", tk).catch(()=>({js:[]}));
+
+        let formatCats = (arr) => {
+            let list = Array.isArray(arr) ? arr : Object.values(arr||{});
+            return list.map(c => ({id: String(c.id), title: String(c.title || c.name)}));
+        };
+
+        res.json({ success: true, categories: { live: formatCats(liveRes?.js), vod: formatCats(vodRes?.js), series: formatCats(seriesRes?.js) } });
+    } catch(e) { res.json({success: false, error: e.message}); }
+});
+
+app.post('/api/get_items', async (req, res) => {
+    const { server, mac, type, selectedCats } = req.body;
+    try {
+        let hsRaw = await callStalkerDirect(server, mac, "stb", "handshake", null);
+        let tk = hsRaw?.js?.token;
+        if(!tk) return res.json({success: false, error: "MAC Blocked"});
+
+        let items = await fetchContentStrict(server, mac, type, selectedCats, null, tk);
+        let formatted = items.map(item => ({
+            id: item.id || item.cmd,
+            name: item.name || item.cmd,
+            logo: item.logo || item.screenshot_uri || ""
+        }));
+        
+        res.json({ success: true, data: formatted });
+    } catch(e) { res.json({success: false, error: e.message}); }
+});
+
+// 🚀 مسار المعاينة الذكي الذي يحاكي مسارات التحويل بالضبط (Bypass CORS) - الكود الأصلي الذي يعمل
+app.get('/proxy_stream', async (req, res) => {
+    let { server, mac, stream_id, type, use_worker } = req.query;
+    try {
+        let tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null);
+        let tk = tkRes?.js?.token;
+        if(!tk) return res.status(403).send("Blocked");
 
         let streamUrl = "";
+        
         if (type === 'vod' || type === 'movie') {
             streamUrl = `${server}/play/movie.php?mac=${mac}&stream=${stream_id}.mkv&type=movie`;
         } else {
-            const cmd = encodeURIComponent(`ffmpeg localhost/ch/${stream_id}`);
-            const linkRes = await callStalkerDirect(server, mac, "itv", `create_link&cmd=${cmd}`, tk);
-            const pt = linkRes?.js?.play_token || linkRes?.js?.token_random || null;
-            if (linkRes?.js?.cmd) {
-                const rawCmd = linkRes.js.cmd;
-                streamUrl = rawCmd.startsWith('ffmpeg ') ? rawCmd.split(' ').pop() : rawCmd;
-                if (pt && !streamUrl.includes('play_token=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + `play_token=${pt}`;
-            }
-            if (!streamUrl) {
-                streamUrl = `${server}/play/live.php?mac=${mac}&stream=${stream_id}&extension=ts`;
-                if (pt) streamUrl += `&play_token=${pt}`;
+            streamUrl = `${server}/play/live.php?mac=${mac}&stream=${stream_id}&extension=ts`;
+            let linkRes = await callStalkerDirect(server, mac, "itv", `create_link&cmd=${encodeURIComponent('ffmpeg localhost/ch/'+stream_id)}`, tk);
+            if (linkRes?.js?.cmd && !linkRes.js.cmd.includes('.m3u8')) {
+                streamUrl = linkRes.js.cmd.startsWith('ffmpeg ') ? linkRes.js.cmd.split(' ').pop() : linkRes.js.cmd;
             }
         }
-        if (!streamUrl) return res.status(404).send("Stream not found");
 
-        const spoofedIP = getSpoofedIP(mac);
-        const reqHeaders = {
-            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+        if(!streamUrl) return res.status(404).send("Stream not found");
+
+        // 🌟 الميزة الاختيارية للـ Worker (مغلقة افتراضياً ليعمل المشغل القديم)
+        if (use_worker === '1') {
+            let workerProxyUrl = `${CLOUDFLARE_WORKER_URL}/?url=${encodeURIComponent(streamUrl)}`;
+            return res.redirect(workerProxyUrl);
+        }
+
+        // الكود الأصلي الذي يعمل لديك باستخدام Pipe
+        const reqHeaders = { 
+            "User-Agent": "VLC/3.0.9 LibVLC/3.0.9", 
             "Accept": "*/*",
-            "Connection": "keep-alive",
-            "Referer": `${server}/c/`,
-            "Cookie": `mac=${mac}; stb_lang=en; timezone=Africa/Algiers;`,
-            "X-Forwarded-For": spoofedIP,
-            "X-Real-IP": spoofedIP,
-            "Client-IP": spoofedIP
+            "Connection": "keep-alive"
         };
+        
         if (req.headers.range) reqHeaders["Range"] = req.headers.range;
-
-        const controller = new AbortController();
-        req.on('close', () => controller.abort());
 
         const fetchRes = await fetch(streamUrl, {
             headers: reqHeaders,
             redirect: 'follow',
-            timeout: 15000,
-            signal: controller.signal
+            timeout: 0 
         });
 
-        if (!fetchRes.ok && fetchRes.status !== 206) {
-            return res.status(fetchRes.status).send(`Stream Error: ${fetchRes.status}`);
-        }
+        if (!fetchRes.ok && fetchRes.status !== 206) return res.status(fetchRes.status).send("Stream Error");
 
-        res.status(fetchRes.status);
-        setCorsHeaders(res);
-        ['content-type', 'content-length', 'content-range', 'accept-ranges'].forEach(h => {
+        res.status(fetchRes.status); 
+        
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Accept-Ranges');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
+        
+        const headersToForward = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+        headersToForward.forEach(h => {
             if (fetchRes.headers.has(h)) res.setHeader(h, fetchRes.headers.get(h));
         });
+
         if (!res.getHeader('Content-Type')) {
             res.setHeader('Content-Type', (type === 'vod' || type === 'movie') ? 'video/mp4' : 'video/mp2t');
         }
 
-        // ضخ البث إلى المتصفح بنظام pipe
-        streamToResponse(fetchRes.body, res, req);
+        fetchRes.body.pipe(res);
 
-    } catch (e) {
-        res.status(500).send("Proxy Error: " + e.message);
+        fetchRes.body.on('error', (err) => { res.end(); });
+        req.on('close', () => { 
+            if (fetchRes.body && typeof fetchRes.body.destroy === 'function') fetchRes.body.destroy(); 
+        });
+
+    } catch(e) { res.status(500).send("Proxy Error"); }
+});
+
+app.get('/get.php', async (req, res) => {
+    let username = (req.query.username || "").trim();
+    let password = (req.query.password || "").trim();
+
+    let authData = await getAuthDataFromFirebase(password);
+    if (!authData || authData.mac.toLowerCase() !== username.toLowerCase()) return res.status(403).send("Unauthorized");
+
+    let portalServer = authData.srv;
+    let stalkerMac = authData.mac; 
+    let sel = authData.selections || { l: [], v: [], s: [] };
+    let fullUrl = `http://${req.headers['x-forwarded-host'] || req.get('host')}`;
+
+    try {
+        let handshakeRes = await callStalkerDirect(portalServer, stalkerMac, "stb", "handshake");
+        let stalkerToken = handshakeRes?.js?.token;
+        if (!stalkerToken) return res.status(403).send("MAC Blocked");
+
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="GAMERDZ1517_${username}.m3u"`);
+        res.write("#EXTM3U\n"); 
+        
+        if (sel.l && sel.l.length > 0) {
+            let catRes = await callStalkerDirect(portalServer, stalkerMac, "itv", "get_genres", stalkerToken);
+            let catList = catRes?.js ? (Array.isArray(catRes.js) ? catRes.js : Object.values(catRes.js)) : [];
+            let catMap = {}; catList.forEach(c => catMap[String(c.id)] = c.title || c.name);
+
+            let channels = await fetchContentStrict(portalServer, stalkerMac, "itv", sel.l, null, stalkerToken);
+            for(let ch of channels) {
+                let cId = String(ch.injected_cat_id || "0");
+                let cName = catMap[cId] || "Live";
+                let logo = getRealLogo(portalServer, ch.logo, 'itv');
+                let name = ch.name || "Unknown";
+                res.write(`#EXTINF:-1 tvg-id="" tvg-name="${name}" tvg-logo="${logo}" group-title="${cName} by ᴳᴬᴹᴱᴿᴰᶻ¹⁵¹⁷",${name}\n`);
+                res.write(`${fullUrl}/live/${username}/${password}/${ch.id}.ts\n`);
+            }
+        }
+
+        if (sel.v && sel.v.length > 0) {
+            let catRes = await callStalkerDirect(portalServer, stalkerMac, "vod", "get_categories", stalkerToken);
+            let catList = catRes?.js ? (Array.isArray(catRes.js) ? catRes.js : Object.values(catRes.js)) : [];
+            let catMap = {}; catList.forEach(c => catMap[String(c.id)] = c.title || c.name);
+
+            let vods = await fetchContentStrict(portalServer, stalkerMac, "vod", sel.v, null, stalkerToken);
+            for(let v of vods) {
+                if(isAdultContent(v.name)) continue;
+                let cId = String(v.injected_cat_id || "0");
+                let cName = catMap[cId] || "Movies";
+                let logo = getRealLogo(portalServer, v.screenshot_uri || v.logo, 'vod');
+                let name = v.name || v.cmd;
+                res.write(`#EXTINF:-1 tvg-id="" tvg-name="${name}" tvg-logo="${logo}" group-title="${cName} by ᴳᴬᴹᴱᴿᴰᶻ¹⁵¹⁷",${name}\n`);
+                res.write(`${fullUrl}/movie/${username}/${password}/${v.id}.mkv\n`);
+            }
+        }
+        res.end();
+    } catch(e) { return res.status(500).send("Error generating M3U"); }
+});
+
+// 🚀 مسارات Xtream (مع تفعيل الكاش الداخلي 🛡️)
+app.all(['/player_api.php', '/panel_api.php', '/xmltv.php'], async (req, res) => {
+    let username = (req.query.username || req.body.username || "").trim();
+    let password = (req.query.password || req.body.password || "").trim();
+    let apiAction = req.query.action || req.body.action || "";
+    let categoryId = req.query.category_id || req.body.category_id;
+    let seriesId = req.query.series_id || req.body.series_id;
+
+    if (req.path.endsWith("xmltv.php")) return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><tv></tv>');
+
+    // 🛡️ فحص الكاش الداخلي
+    let cacheKey = `xtream_${username}_${apiAction}_${categoryId || 'all'}_${seriesId || 'all'}`;
+    if (listsCache.has(cacheKey)) {
+        let cached = listsCache.get(cacheKey);
+        if (Date.now() - cached.time < 14400000) { 
+            return res.json(cached.data);
+        }
+    }
+
+    let authData = await getAuthDataFromFirebase(password);
+
+    if (!authData || authData.mac.toLowerCase() !== username.toLowerCase()) {
+        if (apiAction === "") return res.json({ user_info: { auth: 0, status: "Inactive" } });
+        return res.json(safeFallback(apiAction));
+    }
+
+    let portalServer = authData.srv;
+    let stalkerMac = authData.mac; 
+    let sel = authData.selections || { l: [], v: [], s: [] };
+
+    let host = req.headers['x-forwarded-host'] || req.get('host');
+    let fullUrl = `http://${host}`;
+
+    try {
+        if (apiAction === "") {
+            let timeNow = new Date().toISOString().replace('T', ' ').substring(0, 19);
+            return res.json({
+                user_info: { username: username, password: password, message: "Logged In Successfully", auth: 1, status: "Active", exp_date: "1999999999", is_trial: "0", active_cons: "0", max_connections: "1000", created_at: "1600000000", allowed_output_formats: ["m3u8", "ts", "rtmp", "mkv", "mp4"] },
+                server_info: { url: fullUrl, port: "80", https_port: "443", server_protocol: "http", timezone: "Africa/Algiers", timestamp_now: Math.floor(Date.now() / 1000), time_now: timeNow, version: "2.9.0" }
+            });
+        } 
+        
+        let handshakeRes = await callStalkerDirect(portalServer, stalkerMac, "stb", "handshake");
+        let stalkerToken = handshakeRes?.js?.token;
+        if (!stalkerToken) return res.json(safeFallback(apiAction)); 
+
+        let responseData = [];
+
+        if (apiAction === "get_live_categories") {
+            let r = await callStalkerDirect(portalServer, stalkerMac, "itv", "get_genres", stalkerToken);
+            let list = r?.js ? (Array.isArray(r.js) ? r.js : Object.values(r.js)) : [];
+            if (!sel.l.includes('ALL')) list = list.filter(c => sel.l.includes(String(c.id)));
+            responseData = list.map(c => ({ category_id: String(c.id), category_name: String(c.title || c.name), parent_id: 0 }));
+        } 
+        else if (apiAction === "get_vod_categories") {
+            let r = await callStalkerDirect(portalServer, stalkerMac, "vod", "get_categories", stalkerToken);
+            let list = r?.js ? (Array.isArray(r.js) ? r.js : Object.values(r.js)) : [];
+            if (!sel.v.includes('ALL')) list = list.filter(c => sel.v.includes(String(c.id)));
+            responseData = list.map(c => ({ category_id: String(c.id), category_name: String(c.title || c.name), parent_id: 0 }));
+        } 
+        else if (apiAction === "get_series_categories") {
+            let r = await callStalkerDirect(portalServer, stalkerMac, "series", "get_categories", stalkerToken).catch(() => ({js:[]}));
+            let list = r?.js ? (Array.isArray(r.js) ? r.js : Object.values(r.js)) : [];
+            if (!sel.s.includes('ALL')) list = list.filter(c => sel.s.includes(String(c.id)));
+            responseData = list.map(c => ({ category_id: String(c.id), category_name: String(c.title || c.name), parent_id: 0 }));
+        } 
+        else if (apiAction === "get_live_streams") {
+            let reqCat = (categoryId && categoryId !== "null" && categoryId !== "*" && categoryId !== "0") ? String(categoryId) : null;
+            if (reqCat && !sel.l.includes('ALL') && !sel.l.includes(reqCat)) return res.json([]);
+            let channels = await fetchContentStrict(portalServer, stalkerMac, "itv", sel.l, categoryId, stalkerToken);
+            
+            responseData = channels.map(ch => ({
+                num: parseInt(ch.number || ch.id) || 0, name: String(ch.name || "Unknown"), stream_type: "live", stream_id: parseInt(ch.id) || 0, 
+                stream_icon: getRealLogo(portalServer, ch.logo, 'itv'), 
+                epg_channel_id: null, added: "1600000000", category_id: String(ch.injected_cat_id || "0"), custom_sid: "", tv_archive: parseInt(ch.tv_archive) || 0, direct_source: "", tv_archive_duration: parseInt(ch.tv_archive_duration) || 0
+            }));
+        } 
+        else if (apiAction === "get_vod_streams") {
+            let reqCat = (categoryId && categoryId !== "null" && categoryId !== "*" && categoryId !== "0") ? String(categoryId) : null;
+            if (reqCat && !sel.v.includes('ALL') && !sel.v.includes(reqCat)) return res.json([]);
+            let vods = await fetchContentStrict(portalServer, stalkerMac, "vod", sel.v, categoryId, stalkerToken);
+            
+            responseData = vods.filter(v => !isAdultContent(v.name)).map(v => ({
+                num: parseInt(v.id) || 0, name: String(v.name || v.cmd), stream_type: "movie", stream_id: parseInt(v.id) || 0, 
+                stream_icon: getRealLogo(portalServer, v.screenshot_uri || v.logo, 'vod'),
+                added: "1600000000", category_id: String(v.injected_cat_id || "0"), container_extension: "mkv", rating: String(v.rating || "5"), rating_5based: 5.0, custom_sid: "", direct_source: ""
+            }));
+        } 
+        else if (apiAction === "get_series") {
+            let reqCat = (categoryId && categoryId !== "null" && categoryId !== "*" && categoryId !== "0") ? String(categoryId) : null;
+            if (reqCat && !sel.s.includes('ALL') && !sel.s.includes(reqCat)) return res.json([]);
+            let series = await fetchContentStrict(portalServer, stalkerMac, "series", sel.s, categoryId, stalkerToken);
+            
+            responseData = series.filter(s => !isAdultContent(s.name)).map(s => ({
+                num: parseInt(s.id) || 0, name: String(s.name), series_id: parseInt(s.id) || 0, 
+                cover: getRealLogo(portalServer, s.screenshot_uri || s.logo, 'series'),
+                category_id: String(s.injected_cat_id || "0"), plot: "", cast: "", director: "", genre: "", releaseDate: "", last_modified: "1600000000", rating: "5", rating_5based: 5.0, backdrop_path: [], youtube_trailer: "", episode_run_time: "0"
+            }));
+        }
+        else if (apiAction === "get_series_info" && seriesId) {
+            try {
+                let data = await fetchContentStrict(portalServer, stalkerMac, "series", ['ALL'], null, stalkerToken, `&movie_id=${seriesId}&season_id=0&episode_id=0`);
+                let seasonsInfo = []; let epsObj = {}; let seasonIndex = 1;
+                
+                if (data.length > 0) {
+                    for (let season of data) {
+                        let seasonCmd = season.cmd;
+                        if (!seasonCmd) continue;
+                        let episodesArr = season.series; 
+                        if (!Array.isArray(episodesArr) || episodesArr.length === 0) continue;
+                        
+                        let sNum = String(season.season || seasonIndex);
+                        if (!epsObj[sNum]) epsObj[sNum] = [];
+                        
+                        for (let ep of episodesArr) {
+                            let episodeNum = String(ep);
+                            let streamIdRaw = encodeSafeBase64(`${seasonCmd}::::${episodeNum}`);
+                            
+                            epsObj[sNum].push({ 
+                                id: streamIdRaw, episode_num: parseInt(episodeNum) || 0, title: `Episode ${episodeNum}`, container_extension: "mkv", 
+                                info: { movie_image: getRealLogo(portalServer, season.screenshot_uri || season.cover, 'series'), plot: "", releasedate: "", rating: "5", rating_5based: 5.0, duration_secs: 0, duration: "" }, 
+                                custom_sid: "", added: "1600000000", season: parseInt(sNum), direct_source: "" 
+                            });
+                        }
+                        seasonsInfo.push({ air_date: "", episode_count: episodesArr.length, id: parseInt(sNum), name: `Season ${sNum}`, overview: "", season_number: parseInt(sNum), cover: "", cover_big: "" });
+                        seasonIndex++;
+                    }
+                }
+                if (seasonsInfo.length === 0) { seasonsInfo.push({ air_date: "", episode_count: 0, id: 1, name: "Season 1", overview: "", season_number: 1, cover: "", cover_big: "" }); epsObj["1"] = []; }
+                responseData = { seasons: seasonsInfo, episodes: epsObj, info: { name: "GAMERDZ Series", cover: "", plot: "", cast: "", director: "", genre: "", releaseDate: "", rating: "5", rating_5based: 5.0, backdrop_path: [] } };
+            } catch(e) { responseData = safeFallback("get_series_info"); }
+        }
+        else if (apiAction === "get_short_epg" || apiAction === "get_simple_data_table") {
+            responseData = { epg_listings: [] };
+        }
+
+        // 🛡️ حفظ النتيجة في الكاش
+        if (apiAction !== "") {
+            listsCache.set(cacheKey, { data: responseData, time: Date.now() });
+        }
+
+        return res.json(responseData);
+    } catch (e) { return res.json(safeFallback(apiAction)); }
+});
+
+// 🚀 مسار سحب الفيديو لتطبيقات Xtream و المضاف له ترويسات CORS الكاملة - الكود الأصلي الذي يعمل
+app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:user/:pass/:stream', '/:user/:pass/:stream'], async (req, res) => {
+    const type = req.path.split('/')[1] || "live";
+    const username = decodeURIComponent(req.params.user).trim();
+    const reqPass = decodeURIComponent(req.params.pass).trim();
+    let streamId = req.params.stream; if (streamId.includes('.')) streamId = streamId.split('.')[0];
+    let use_worker = req.query.use_worker;
+
+    let authData = await getAuthDataFromFirebase(reqPass);
+    if (!authData || authData.mac.toLowerCase() !== username.toLowerCase()) return res.status(403).send("Unauthorized");
+
+    let server = authData.srv;
+    let stalkerMac = authData.mac; 
+
+    try {
+        let finalStreamUrl = "";
+
+        if (type === "movie") {
+            finalStreamUrl = `${server}/play/movie.php?mac=${stalkerMac}&stream=${streamId}.mkv&type=${type}`;
+        } 
+        else if (type === "series") {
+            let actualId = streamId;
+            let playToken = "";
+            try {
+                let decodedId = decodeSafeBase64(streamId);
+                if (decodedId.includes("::::")) actualId = decodedId.split("::::")[0];
+            } catch(e) {}
+
+            if (actualId.includes("-")) {
+                let idx = actualId.indexOf("-");
+                playToken = actualId.substring(idx + 1);
+                actualId = actualId.substring(0, idx);
+            }
+
+            finalStreamUrl = `${server}/play/movie.php?mac=${stalkerMac}&stream=${actualId}.mkv&type=series`;
+            if (playToken) finalStreamUrl += `&play_token=${playToken}`;
+        } 
+        else {
+            finalStreamUrl = `${server}/play/live.php?mac=${stalkerMac}&stream=${streamId}&extension=ts`;
+            const handshakeRes = await callStalkerDirect(server, stalkerMac, "stb", "handshake");
+            const stalkerToken = handshakeRes?.js?.token;
+            if (!stalkerToken) return res.status(403).send("MAC Blocked");
+
+            let cmd = encodeURIComponent(`ffmpeg localhost/ch/${streamId}`);
+            let linkRes = await callStalkerDirect(server, stalkerMac, "itv", `create_link&cmd=${cmd}`, stalkerToken);
+            if (linkRes?.js?.cmd && !linkRes.js.cmd.includes('.m3u8')) {
+                finalStreamUrl = linkRes.js.cmd.startsWith('ffmpeg ') ? linkRes.js.cmd.split(' ').pop() : linkRes.js.cmd;
+            }
+        }
+
+        if (!finalStreamUrl) return res.status(404).send("Stream Not Found");
+
+        // 🌟 الميزة الاختيارية للـ Worker
+        if (use_worker === '1') {
+            let workerProxyUrl = `${CLOUDFLARE_WORKER_URL}/?url=${encodeURIComponent(finalStreamUrl)}`;
+            return res.redirect(workerProxyUrl);
+        }
+
+        // الكود الأصلي الذي يعمل لديك باستخدام Pipe
+        const reqHeaders = { 
+            "User-Agent": "VLC/3.0.9 LibVLC/3.0.9", 
+            "Accept": "*/*",
+            "Connection": "keep-alive"
+        };
+        
+        if (req.headers.range) reqHeaders["Range"] = req.headers.range;
+
+        const fetchRes = await fetch(finalStreamUrl, {
+            headers: reqHeaders,
+            redirect: 'follow',
+            timeout: 0
+        });
+
+        if (!fetchRes.ok && fetchRes.status !== 206) return res.status(fetchRes.status).send("Stream Error");
+
+        res.status(fetchRes.status);
+        
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Accept-Ranges');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
+        
+        const headersToForward = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+        headersToForward.forEach(h => {
+            if (fetchRes.headers.has(h)) res.setHeader(h, fetchRes.headers.get(h));
+        });
+
+        if (!res.getHeader('Content-Type')) {
+            res.setHeader('Content-Type', (type === "live" ? 'video/mp2t' : 'video/mp4'));
+        }
+        
+        fetchRes.body.pipe(res);
+
+        fetchRes.body.on('error', (err) => res.end());
+        req.on('close', () => {
+            if (fetchRes.body && typeof fetchRes.body.destroy === 'function') fetchRes.body.destroy();
+        });
+
+    } catch(e) { 
+        return res.status(500).send("Bridge Error"); 
     }
 });
 
-// 5. محاكاة Xtream
-app.get('/player_api.php', async (req, res) => { res.json({ user_info: { auth: 1, status: "Active" } }); });
-app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:user/:pass/:stream'], async (req, res) => {
-    const reqPass = req.params.pass;
-    const streamId = req.params.stream.split('.')[0];
-    const typeStr = req.path.includes('/movie/') ? 'vod' : 'itv';
-
-    try {
-        const fbRes = await fetch(`${FIREBASE_URL}/accounts/${reqPass}.json`);
-        const account = await fbRes.json();
-        if (account && account.server && account.mac) {
-            res.redirect(302, `/proxy_stream?server=${encodeURIComponent(account.server)}&mac=${encodeURIComponent(account.mac)}&stream_id=${streamId}&type=${typeStr}`);
-        } else {
-            res.status(401).send("Unauthorized");
-        }
-    } catch (e) { res.status(500).send("Error"); }
-});
-
-app.get('/', (req, res) => res.status(200).send('✅ GAMERDZ1517 BACKEND IS RUNNING!'));
-app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
