@@ -16,7 +16,6 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // ==============================================================
 // دوال مساعدة
 // ==============================================================
-// نستخدم دالة لتوليد IP جزائري وهمي للمساعدة في التخطي
 function getSpoofedIP(mac) {
     if (!mac) return '197.22.14.11';
     let hash = 0; const str = String(mac).toLowerCase();
@@ -25,7 +24,6 @@ function getSpoofedIP(mac) {
     return `197.${(hash % 200) + 10}.${((hash >> 8) % 200) + 10}.${((hash >> 16) % 200) + 10}`;
 }
 
-// دالة لتمرير البث المباشر (Streaming) بكفاءة إلى المتصفح
 function streamToResponse(fetchBody, res, req) {
     if (fetchBody.on && typeof fetchBody.on === 'function') {
         fetchBody.on('data', (chunk) => { if (!res.writableEnded) res.write(chunk); });
@@ -43,12 +41,12 @@ function streamToResponse(fetchBody, res, req) {
 function setCorsHeaders(res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Accept-Ranges, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Accept-Ranges');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
 }
 
-async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerAction, token = null, userIp = null) {
-    const spoofedIP = userIp || getSpoofedIP(macAddress);
+async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerAction, token = null) {
+    const spoofedIP = getSpoofedIP(macAddress);
     const headers = {
         "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
         "Referer": `${serverUrl}/c/`,
@@ -184,7 +182,7 @@ app.post('/create_account', async (req, res) => {
 });
 
 // ==============================================================
-// 4️⃣ البروكسي الداخلي المباشر للبث (Streaming)
+// 4️⃣ البروكسي الداخلي السحري للبث المباشر 🚀 (بدون CF Worker)
 // ==============================================================
 app.get('/proxy_stream', async (req, res) => {
     let { server, mac, stream_id, type } = req.query;
@@ -195,29 +193,19 @@ app.get('/proxy_stream', async (req, res) => {
     }
     if (!server || !mac || !stream_id) return res.status(400).send("Missing params");
 
-    console.log(`[PROXY_STREAM] server=${server} stream_id=${stream_id} type=${type}`);
+    console.log(`[PROXY] server=${server} stream_id=${stream_id} type=${type}`);
 
     try {
-        // نأخذ الآي بي الفعلي للمستخدم الذي طلب البث (الذي يزور منصة بلوجر)
-        const userIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || getSpoofedIP(mac);
-
-        // نجلب التوكن باستخدام آي بي المستخدم
-        const tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null, userIp);
+        const tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null);
         const tk = tkRes?.js?.token;
+        if (!tk) return res.status(403).send("MAC Blocked");
 
-        if (!tk) {
-            console.log(`[PROXY_STREAM] Failed to get token for MAC: ${mac}`);
-            res.setHeader('Content-Type', 'video/mp2t');
-            return res.status(403).end();
-        }
-
-        // نجلب الرابط النهائي
         let streamUrl = "";
         if (type === 'vod' || type === 'movie') {
             streamUrl = `${server}/play/movie.php?mac=${mac}&stream=${stream_id}.mkv&type=movie`;
         } else {
             const cmd = encodeURIComponent(`ffmpeg localhost/ch/${stream_id}`);
-            const linkRes = await callStalkerDirect(server, mac, "itv", `create_link&cmd=${cmd}`, tk, userIp);
+            const linkRes = await callStalkerDirect(server, mac, "itv", `create_link&cmd=${cmd}`, tk);
             const pt = linkRes?.js?.play_token || linkRes?.js?.token_random || "";
 
             if (linkRes?.js?.cmd) {
@@ -229,7 +217,8 @@ app.get('/proxy_stream', async (req, res) => {
             if (pt && !streamUrl.includes('play_token=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + `play_token=${pt}`;
         }
 
-        // 🚀 الآن نتصل بالبث متخفين كأننا المستخدم نفسه (باستخدام آي بي الخاص به)
+        const spoofedIP = getSpoofedIP(mac);
+        // 🚀 تمرير جميع الهيدرز متطابقة مع التوكن + توكن 511 + منع حظر 403
         const reqHeaders = {
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Accept": "*/*",
@@ -237,9 +226,9 @@ app.get('/proxy_stream', async (req, res) => {
             "Referer": `${server}/c/`,
             "Cookie": `mac=${mac}; stb_lang=en; timezone=Africa/Algiers;`,
             "Authorization": `Bearer ${tk}`,
-            "X-Forwarded-For": userIp,
-            "X-Real-IP": userIp,
-            "Client-IP": userIp
+            "X-Forwarded-For": spoofedIP,
+            "X-Real-IP": spoofedIP,
+            "Client-IP": spoofedIP
         };
 
         if (req.headers.range) reqHeaders["Range"] = req.headers.range;
@@ -255,28 +244,23 @@ app.get('/proxy_stream', async (req, res) => {
         });
 
         if (!fetchRes.ok && fetchRes.status !== 206) {
-            console.log(`[PROXY_STREAM] Upstream server returned status: ${fetchRes.status}`);
-            res.setHeader('Content-Type', 'video/mp2t');
-            return res.status(fetchRes.status).end();
+            console.log(`[PROXY] Blocked by server: ${fetchRes.status}`);
+            return res.status(fetchRes.status).send(`Stream Error: ${fetchRes.status}`);
         }
 
-        // نمرر البيانات للمتصفح بأمان تام
         res.status(fetchRes.status);
         setCorsHeaders(res);
-        ['content-length','content-range','accept-ranges'].forEach(h => {
+        ['content-type','content-length','content-range','accept-ranges'].forEach(h => {
             if (fetchRes.headers.has(h)) res.setHeader(h, fetchRes.headers.get(h));
         });
+        if (!res.getHeader('Content-Type')) res.setHeader('Content-Type', (type==='vod'||type==='movie') ? 'video/mp4' : 'video/mp2t');
         
-        // إجبار المتصفح على التعرف على الفيديو
-        res.setHeader('Content-Type', (type==='vod'||type==='movie') ? 'video/mp4' : 'video/mp2t');
-
-        // نمرر البث إلى المتصفح
+        // 🚀 تمرير الفيديو بكفاءة للمتصفح
         streamToResponse(fetchRes.body, res, req);
 
     } catch (e) {
-        console.error(`[PROXY_STREAM] Error:`, e.message);
-        res.setHeader('Content-Type', 'video/mp2t');
-        res.status(500).end();
+        console.log(`[PROXY] Exception: ${e.message}`);
+        res.status(500).send("Proxy Error");
     }
 });
 
@@ -297,7 +281,6 @@ app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:us
         const account = await fbRes.json();
         
         if (account && account.server && account.mac) {
-            // نوجه التطبيقات إلى مسار البروكسي الخاص بنا للتعامل معها
             res.redirect(302, `/proxy_stream?server=${encodeURIComponent(account.server)}&mac=${encodeURIComponent(account.mac)}&stream_id=${streamId}&type=${typeStr}`);
         } else {
             res.status(401).send("Unauthorized");
