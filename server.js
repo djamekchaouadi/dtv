@@ -27,9 +27,15 @@ function getSpoofedIP(mac) {
     return `197.${(hash % 200) + 10}.${((hash >> 8) % 200) + 10}.${((hash >> 16) % 200) + 10}`;
 }
 
-// دالة تمرير تدفق الفيديو إلى المتصفح مباشرة
+// دالة تمرير الفيديو الآمنة بنظام Pipe
 function streamToResponse(fetchBody, res, req) {
-    if (fetchBody.on && typeof fetchBody.on === 'function') {
+    if (fetchBody.pipe && typeof fetchBody.pipe === 'function') {
+        fetchBody.pipe(res);
+        req.on('close', () => {
+            if (fetchBody.destroy) fetchBody.destroy();
+            if (!res.writableEnded) res.end();
+        });
+    } else if (fetchBody.on && typeof fetchBody.on === 'function') {
         fetchBody.on('data', (chunk) => { if (!res.writableEnded) res.write(chunk); });
         fetchBody.on('end',   ()      => { if (!res.writableEnded) res.end(); });
         fetchBody.on('error', ()      => { if (!res.writableEnded) res.end(); });
@@ -112,7 +118,7 @@ async function fetchContentStrict(server, mac, type, allowedIds, categoryId, tok
     return Array.from(uniqueMap.values());
 }
 
-// 1. الفحص
+// 1. فحص السيرفر
 app.get('/api/scan', async (req, res) => {
     let { server, mac } = req.query;
     try {
@@ -235,7 +241,7 @@ app.get('/proxy_stream', async (req, res) => {
             res.setHeader('Content-Type', (type === 'vod' || type === 'movie') ? 'video/mp4' : 'video/mp2t');
         }
 
-        // ضخ البث إلى المتصفح
+        // ضخ البث إلى المتصفح بنظام pipe
         streamToResponse(fetchRes.body, res, req);
 
     } catch (e) {
