@@ -8,6 +8,7 @@ const PORT = process.env.PORT || 3000;
 
 // ⚙️ الإعدادات الأساسية
 const FIREBASE_URL = "https://gamerdz1517-db-default-rtdb.europe-west1.firebasedatabase.app";
+const CLOUDFLARE_WORKER_URL = "https://xt2.gamerdz1517.com"; // العامل الكادح للبث
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
@@ -22,27 +23,6 @@ function getSpoofedIP(mac) {
     for (let i = 0; i < str.length; i++) { hash = ((hash << 5) - hash) + str.charCodeAt(i); hash |= 0; }
     hash = Math.abs(hash);
     return `197.${(hash % 200) + 10}.${((hash >> 8) % 200) + 10}.${((hash >> 16) % 200) + 10}`;
-}
-
-function streamToResponse(fetchBody, res, req) {
-    if (fetchBody.on && typeof fetchBody.on === 'function') {
-        fetchBody.on('data', (chunk) => { if (!res.writableEnded) res.write(chunk); });
-        fetchBody.on('end',   ()      => { if (!res.writableEnded) res.end(); });
-        fetchBody.on('error', ()      => { if (!res.writableEnded) res.end(); });
-        req.on('close', () => {
-            if (!res.writableEnded) res.end();
-            if (typeof fetchBody.destroy === 'function') fetchBody.destroy();
-        });
-    } else {
-        if (!res.writableEnded) res.end();
-    }
-}
-
-function setCorsHeaders(res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Accept-Ranges');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
 }
 
 async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerAction, token = null) {
@@ -66,6 +46,7 @@ async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerActi
     } catch { return null; }
 }
 
+// 🚀 الدالة المفقودة لجلب القنوات والأفلام (تمت إعادتها)
 async function fetchContentStrict(server, mac, type, allowedIds, categoryId, token, extraParam = "") {
     const genreParam = type === "itv" ? "genre" : "category";
     const targetCat  = (categoryId && !["0","*","null","undefined"].includes(categoryId)) ? categoryId : "";
@@ -116,7 +97,7 @@ async function fetchContentStrict(server, mac, type, allowedIds, categoryId, tok
 }
 
 // ==============================================================
-// 1️⃣ الفحص وجلب التصنيفات 
+// 1️⃣ الفحص وجلب التصنيفات (للمنصة)
 // ==============================================================
 app.get('/api/scan', async (req, res) => {
     let { server, mac } = req.query;
@@ -138,9 +119,7 @@ app.get('/api/scan', async (req, res) => {
     } catch(e) { res.json({success: false, error: e.message}); }
 });
 
-// ==============================================================
-// 2️⃣ جلب القنوات
-// ==============================================================
+// 🚀 المسار المفقود لجلب محتوى التصنيفات داخل المشغل (تمت إعادته)
 app.post('/api/get_items', async (req, res) => {
     const { server, mac, type, selectedCats } = req.body;
     try {
@@ -159,7 +138,7 @@ app.post('/api/get_items', async (req, res) => {
 });
 
 // ==============================================================
-// 3️⃣ إنشاء الحساب (Firebase)
+// 2️⃣ إنشاء حساب وحفظه في Firebase
 // ==============================================================
 app.post('/create_account', async (req, res) => {
     try {
@@ -182,18 +161,13 @@ app.post('/create_account', async (req, res) => {
 });
 
 // ==============================================================
-// 4️⃣ البروكسي الداخلي السحري للبث المباشر 🚀 (بدون CF Worker)
+// 3️⃣ استخراج رابط البث وتحويله للـ Cloudflare Worker 🚀
 // ==============================================================
 app.get('/proxy_stream', async (req, res) => {
     let { server, mac, stream_id, type } = req.query;
-
-    if (server) {
-        server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
-        if (!server.startsWith('http')) server = 'http://' + server;
-    }
     if (!server || !mac || !stream_id) return res.status(400).send("Missing params");
 
-    console.log(`[PROXY] server=${server} stream_id=${stream_id} type=${type}`);
+    server = server.trim().replace(/\/c\/?$/i, '').replace(/\/+$/, '');
 
     try {
         const tkRes = await callStalkerDirect(server, mac, "stb", "handshake", null);
@@ -217,60 +191,23 @@ app.get('/proxy_stream', async (req, res) => {
             if (pt && !streamUrl.includes('play_token=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + `play_token=${pt}`;
         }
 
-        const spoofedIP = getSpoofedIP(mac);
-        // 🚀 تمرير جميع الهيدرز متطابقة مع التوكن + توكن 511 + منع حظر 403
-        const reqHeaders = {
-            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-            "Accept": "*/*",
-            "Connection": "keep-alive",
-            "Referer": `${server}/c/`,
-            "Cookie": `mac=${mac}; stb_lang=en; timezone=Africa/Algiers;`,
-            "Authorization": `Bearer ${tk}`,
-            "X-Forwarded-For": spoofedIP,
-            "X-Real-IP": spoofedIP,
-            "Client-IP": spoofedIP
-        };
-
-        if (req.headers.range) reqHeaders["Range"] = req.headers.range;
-
-        const controller = new AbortController();
-        req.on('close', () => controller.abort());
-
-        const fetchRes = await fetch(streamUrl, { 
-            headers: reqHeaders, 
-            redirect: 'follow', 
-            timeout: 15000, 
-            signal: controller.signal 
-        });
-
-        if (!fetchRes.ok && fetchRes.status !== 206) {
-            console.log(`[PROXY] Blocked by server: ${fetchRes.status}`);
-            return res.status(fetchRes.status).send(`Stream Error: ${fetchRes.status}`);
-        }
-
-        res.status(fetchRes.status);
-        setCorsHeaders(res);
-        ['content-type','content-length','content-range','accept-ranges'].forEach(h => {
-            if (fetchRes.headers.has(h)) res.setHeader(h, fetchRes.headers.get(h));
-        });
-        if (!res.getHeader('Content-Type')) res.setHeader('Content-Type', (type==='vod'||type==='movie') ? 'video/mp4' : 'video/mp2t');
-        
-        // 🚀 تمرير الفيديو بكفاءة للمتصفح
-        streamToResponse(fetchRes.body, res, req);
+        // تحويل المتصفح فوراً إلى الوركر ليتكفل بالبث بدون ضغط على السيرفر
+        const workerUrl = `${CLOUDFLARE_WORKER_URL}/stream?url=${encodeURIComponent(streamUrl)}&mac=${encodeURIComponent(mac)}&token=${encodeURIComponent(tk)}`;
+        return res.redirect(302, workerUrl);
 
     } catch (e) {
-        console.log(`[PROXY] Exception: ${e.message}`);
         res.status(500).send("Proxy Error");
     }
 });
 
 // ==============================================================
-// 5️⃣ محاكاة واجهة Xtream Codes API (لتعمل على التطبيقات)
+// 4️⃣ محاكاة واجهة Xtream Codes API (لتعمل على التطبيقات)
 // ==============================================================
 app.get('/player_api.php', async (req, res) => {
     res.json({ user_info: { auth: 1, status: "Active" } });
 });
 
+// توجيه روابط البث القادمة من تطبيقات الاكستريم إلى مسار /proxy_stream ليحولها للوركر
 app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:user/:pass/:stream'], async (req, res) => {
     const reqPass = req.params.pass;
     const streamId = req.params.stream.split('.')[0];
@@ -281,6 +218,7 @@ app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:us
         const account = await fbRes.json();
         
         if (account && account.server && account.mac) {
+            // توجيه الطلب داخلياً للبروكسي الخاص بنا والذي سيحوله بدوره لـ Cloudflare
             res.redirect(302, `/proxy_stream?server=${encodeURIComponent(account.server)}&mac=${encodeURIComponent(account.mac)}&stream_id=${streamId}&type=${typeStr}`);
         } else {
             res.status(401).send("Unauthorized");
@@ -288,6 +226,6 @@ app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:us
     } catch(e) { res.status(500).send("Error"); }
 });
 
-app.get('/', (req, res) => res.send('✅ GAMERDZ1517 BACKEND IS RUNNING PERFECTLY!'));
+app.get('/', (req, res) => res.send('✅ GAMERDZ1517 BACKEND IS RUNNING!'));
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
