@@ -1,16 +1,17 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+// 🚀 إضافة مكتبة https لتخطي حماية السيرفرات الخارجية
 const https = require('https');
-const insecureAgent = new https.Agent({ rejectUnauthorized: false });
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // ⚠️ رابط قاعدة بيانات Firebase الخاص بك
 const FIREBASE_URL = "https://gamerdz1517-db-default-rtdb.europe-west1.firebasedatabase.app"; 
 
-// ⚠️ رابط Cloudflare Worker الخاص بك (احتياطي فقط)
-const CLOUDFLARE_WORKER_URL = "https://run.djamelchaouadi.workers.dev";
+// 🚀 تخطي حماية SSL للسيرفرات الخارجية لكي لا تعطي "محظور"
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // 🛡️ حماية السيرفر من الانهيار
 process.on('uncaughtException', function (err) { console.error('Caught exception: ', err); });
@@ -20,7 +21,7 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
-// 🛡️ نظام الكاش الذكي لتقليل الطلبات وحماية السيرفر (تمت إضافته لكودك الأصلي)
+// 🛡️ نظام الكاش الذكي لتقليل الطلبات وحماية السيرفر
 const listsCache = new Map();
 app.use((req, res, next) => {
     if (req.path.includes('player_api') || req.path.includes('get_items') || req.path.includes('scan') || req.path.includes('get.php')) {
@@ -112,24 +113,14 @@ async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerActi
     }
 
     try {
-        // تجهيز خيارات الاتصال
-        let fetchOptions = { 
-            headers: headers, 
-            timeout: 35000 
-        };
-        
-        // 🚀 السطر السحري: إجبار السيرفر على تجاهل أخطاء SSL إذا كان الرابط يبدأ بـ https
-        if (targetUrl.startsWith('https')) {
-            fetchOptions.agent = insecureAgent;
-        }
+        let fetchOptions = { headers: headers, timeout: 35000 };
+        // 🚀 إجبار السيرفر الخارجي على قبول الاتصال حتى لو كانت شهادته منتهية
+        if (targetUrl.startsWith('https')) fetchOptions.agent = insecureAgent;
 
         const res = await fetch(targetUrl, fetchOptions);
         if (!res.ok) return null;
         return await res.json();
-    } catch(e) { 
-        console.error("Stalker Fetch Error: ", e.message);
-        return null; 
-    }
+    } catch(e) { return null; }
 }
 
 async function fetchContentStrict(server, mac, type, allowedIds, categoryId, token, extraParam = "") {
@@ -180,7 +171,9 @@ async function fetchContentStrict(server, mac, type, allowedIds, categoryId, tok
                 if (pageData.length > 0) {
                     for (let x = 0; x < pageData.length; x++) {
                         let item = pageData[x];
-                        let itemCatId = String(item.tv_genre_id || item.category_id || catId || targetCat || "0");
+                        
+                        // 🚀 التصحيح الأهم: إجبار القنوات على أخذ رقم الباقة المطلوبة بشكل قاطع لتفادي ضياعها
+                        let itemCatId = String(catId !== "" ? catId : (item.tv_genre_id || item.category_id || targetCat || "0"));
 
                         if (allowedIds.includes('ALL') || allowedIds.includes(itemCatId) || extraParam !== "") {
                             let id = item.id || item.cmd;
@@ -266,7 +259,6 @@ app.post('/api/get_items', async (req, res) => {
     } catch(e) { res.json({success: false, error: e.message}); }
 });
 
-// 🚀 مسار المعاينة الذكي الذي يحاكي مسارات التحويل بالضبط (Bypass CORS) - الكود الأصلي الذي يعمل
 app.get('/proxy_stream', async (req, res) => {
     let { server, mac, stream_id, type, use_worker } = req.query;
     try {
@@ -288,13 +280,6 @@ app.get('/proxy_stream', async (req, res) => {
 
         if(!streamUrl) return res.status(404).send("Stream not found");
 
-        // 🌟 الميزة الاختيارية للـ Worker (مغلقة افتراضياً ليعمل المشغل القديم)
-        if (use_worker === '1') {
-            let workerProxyUrl = `${CLOUDFLARE_WORKER_URL}/?url=${encodeURIComponent(streamUrl)}`;
-            return res.redirect(workerProxyUrl);
-        }
-
-        // الكود الأصلي الذي يعمل لديك باستخدام Pipe
         const reqHeaders = { 
             "User-Agent": "VLC/3.0.9 LibVLC/3.0.9", 
             "Accept": "*/*",
@@ -306,13 +291,17 @@ app.get('/proxy_stream', async (req, res) => {
         const fetchRes = await fetch(streamUrl, {
             headers: reqHeaders,
             redirect: 'follow',
-            timeout: 0 
+            timeout: 0,
+            agent: streamUrl.startsWith('https') ? insecureAgent : undefined
         });
 
         if (!fetchRes.ok && fetchRes.status !== 206) return res.status(fetchRes.status).send("Stream Error");
 
         res.status(fetchRes.status); 
         
+        res.setHeader('X-Accel-Buffering', 'no'); 
+        res.setHeader('Content-Disposition', 'inline');
+
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Accept-Ranges');
@@ -394,7 +383,7 @@ app.get('/get.php', async (req, res) => {
     } catch(e) { return res.status(500).send("Error generating M3U"); }
 });
 
-// 🚀 مسارات Xtream (مع تفعيل الكاش الداخلي 🛡️)
+// 🚀 مسارات Xtream المحدثة لتفادي التداخل في الباقات
 app.all(['/player_api.php', '/panel_api.php', '/xmltv.php'], async (req, res) => {
     let username = (req.query.username || req.body.username || "").trim();
     let password = (req.query.password || req.body.password || "").trim();
@@ -404,8 +393,8 @@ app.all(['/player_api.php', '/panel_api.php', '/xmltv.php'], async (req, res) =>
 
     if (req.path.endsWith("xmltv.php")) return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><tv></tv>');
 
-    // 🛡️ فحص الكاش الداخلي
-    let cacheKey = `xtream_${username}_${apiAction}_${categoryId || 'all'}_${seriesId || 'all'}`;
+    // 🚀 التصحيح الأهم: إضافة Password في مفتاح الكاش لمنع التداخل بين الحسابات
+    let cacheKey = `xtream_${username}_${password}_${apiAction}_${categoryId || 'all'}_${seriesId || 'all'}`;
     if (listsCache.has(cacheKey)) {
         let cached = listsCache.get(cacheKey);
         if (Date.now() - cached.time < 14400000) { 
@@ -539,7 +528,7 @@ app.all(['/player_api.php', '/panel_api.php', '/xmltv.php'], async (req, res) =>
     } catch (e) { return res.json(safeFallback(apiAction)); }
 });
 
-// 🚀 مسار سحب الفيديو لتطبيقات Xtream و المضاف له ترويسات CORS الكاملة - الكود الأصلي الذي يعمل
+// مسارات سحب الفيديو (لا تحتاج لتغيير)
 app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:user/:pass/:stream', '/:user/:pass/:stream'], async (req, res) => {
     const type = req.path.split('/')[1] || "live";
     const username = decodeURIComponent(req.params.user).trim();
@@ -591,13 +580,6 @@ app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:us
 
         if (!finalStreamUrl) return res.status(404).send("Stream Not Found");
 
-        // 🌟 الميزة الاختيارية للـ Worker
-        if (use_worker === '1') {
-            let workerProxyUrl = `${CLOUDFLARE_WORKER_URL}/?url=${encodeURIComponent(finalStreamUrl)}`;
-            return res.redirect(workerProxyUrl);
-        }
-
-        // الكود الأصلي الذي يعمل لديك باستخدام Pipe
         const reqHeaders = { 
             "User-Agent": "VLC/3.0.9 LibVLC/3.0.9", 
             "Accept": "*/*",
@@ -609,7 +591,8 @@ app.get(['/live/:user/:pass/:stream', '/movie/:user/:pass/:stream', '/series/:us
         const fetchRes = await fetch(finalStreamUrl, {
             headers: reqHeaders,
             redirect: 'follow',
-            timeout: 0
+            timeout: 0,
+            agent: finalStreamUrl.startsWith('https') ? insecureAgent : undefined
         });
 
         if (!fetchRes.ok && fetchRes.status !== 206) return res.status(fetchRes.status).send("Stream Error");
