@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-
+const https = require('https');
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -111,10 +112,24 @@ async function callStalkerDirect(serverUrl, macAddress, stalkerType, stalkerActi
     }
 
     try {
-        const res = await fetch(targetUrl, { headers: headers, timeout: 35000 });
+        // تجهيز خيارات الاتصال
+        let fetchOptions = { 
+            headers: headers, 
+            timeout: 35000 
+        };
+        
+        // 🚀 السطر السحري: إجبار السيرفر على تجاهل أخطاء SSL إذا كان الرابط يبدأ بـ https
+        if (targetUrl.startsWith('https')) {
+            fetchOptions.agent = insecureAgent;
+        }
+
+        const res = await fetch(targetUrl, fetchOptions);
         if (!res.ok) return null;
         return await res.json();
-    } catch(e) { return null; }
+    } catch(e) { 
+        console.error("Stalker Fetch Error: ", e.message);
+        return null; 
+    }
 }
 
 async function fetchContentStrict(server, mac, type, allowedIds, categoryId, token, extraParam = "") {
